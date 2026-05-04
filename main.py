@@ -1197,9 +1197,14 @@ def run():
         sys.exit(1)
 
     # Initial heartbeat loop until we get a successful response from Pi Pico
-    print("Waiting: Waiting for Pi Pico heartbeat")
-    while not pico_state:
-        wait_for_pico()
+    # Skip if using Arduino (heartbeat not supported)
+    if settings.USE_HEARTBEAT:
+        print("Waiting: Waiting for Pi Pico heartbeat")
+        while not pico_state:
+            wait_for_pico()
+    else:
+        print("INFO: Heartbeat disabled (Arduino detected). Skipping heartbeat initialization.")
+        pico_state = True  # Set to True to bypass heartbeat checks in main loop
 
     # Check GPIO input if available
     if setup.gpio_available:
@@ -1251,8 +1256,8 @@ def run():
             # Run any pending scheduled jobs
             schedule.run_pending()
 
-            # Check if the Pi Pico is still sending heartbeats
-            if now - pico_heartbeat_time > settings.UART_SETTINGS["heartbeat_timeout"]:
+            # Check if the Pi Pico is still sending heartbeats (skip if using Arduino)
+            if settings.USE_HEARTBEAT and now - pico_heartbeat_time > settings.UART_SETTINGS["heartbeat_timeout"]:
                 standby()
                 wait_for_pico()
                 pico_heartbeat_time = now
@@ -1281,8 +1286,8 @@ def run():
                 tuning()
                 play_static()
 
-            # Send heartbeat to Pico if necessary
-            if now - heartbeat_time > settings.UART_SETTINGS["heartbeat_interval"]:
+            # Send heartbeat to Pico if necessary (skip if using Arduino)
+            if settings.USE_HEARTBEAT and now - heartbeat_time > settings.UART_SETTINGS["heartbeat_interval"]:
                 send_uart("H", "Zero")
                 heartbeat_time = now
 

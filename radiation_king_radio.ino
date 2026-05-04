@@ -262,11 +262,6 @@ void process_uart_message(char* buffer, int length) {
       // For now, just acknowledge
       break;
       
-    case 'H': // Heartbeat
-      // Echo heartbeat response
-      send_uart("H", "Arduino", "", "", "");
-      break;
-      
     case 'I': // Info message
       // Main code is sending info, just acknowledge
       break;

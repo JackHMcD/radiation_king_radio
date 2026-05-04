@@ -67,6 +67,10 @@ MOTOR_SETTINGS["range"] = MOTOR_SETTINGS["max_angle"] - MOTOR_SETTINGS["min_angl
 DISABLE_HEARTBEAT_LED = False
 GAUGE_PIXEL_QUANTITY = 7  # 1 less than Pico gauge_pixel_qty
 
+# Device detection - will be set during setup based on detected hardware
+DEVICE_TYPE = None  # Will be set to "Pico" or "Arduino" during initialization
+USE_HEARTBEAT = True  # Will be set to False if Arduino is detected
+
 # UART settings
 UART_SETTINGS = {
     "baud_rate": 115200,

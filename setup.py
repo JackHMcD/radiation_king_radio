@@ -74,6 +74,7 @@ def open_serial_connection():
     # First attempt: try the configured port (usually for Pico)
     configured_port = settings.UART_SETTINGS['serial_port']
     arduino_port = None
+    device_detected = None
 
     while not uart and retry_count < max_retries and not exit_requested:
         if time.time() - start_time > total_timeout:
@@ -92,11 +93,15 @@ def open_serial_connection():
                 if arduino_port:
                     print(f"INFO: Found Arduino, switching to port {arduino_port}")
                     port_to_try = arduino_port
+                    device_detected = "Arduino"
                 else:
                     print("ERROR: Neither Pi Pico nor Arduino found on available serial ports.")
                     retry_count += 1
                     time.sleep(3)
                     continue
+            elif validate_serial_port(configured_port):
+                # Configured port (Pico) is available
+                device_detected = "Pico"
             
             # Attempt connection
             print(f"INFO: Attempting to connect to UART on port {port_to_try} "
@@ -113,6 +118,14 @@ def open_serial_connection():
                 print(f"INFO: UART successfully connected on port {uart.name}")
                 # Update settings to remember which port we're using
                 settings.UART_SETTINGS['serial_port'] = port_to_try
+                # Set device type and heartbeat settings
+                settings.DEVICE_TYPE = device_detected
+                if device_detected == "Arduino":
+                    settings.USE_HEARTBEAT = False
+                    print("INFO: Arduino detected. Heartbeat disabled.")
+                else:
+                    settings.USE_HEARTBEAT = True
+                    print("INFO: Pi Pico detected. Heartbeat enabled.")
                 return  # Exit the loop on success
         except serial.SerialException as e:
             print(f"ERROR: Failed to connect to UART: {e}")
@@ -280,31 +293,38 @@ def get_uart():
 # Arduino Detection
 def find_arduino_port():
     """
-    Detect Arduino board on serial ports.
-    Returns the port name if found, None otherwise.
+    Detect Arduino board on serial ports with improved fallback logic.
     """
     try:
         available_ports = serial.tools.list_ports.comports()
-        print(f"DEBUG: Available serial ports: {[port.device for port in available_ports]}")
+        potential_fallback = None
         
+        # Pull manufacturer list from settings
+        target_manufacturers = settings.ARDUINO.get("manufacturers", [])
+
         for port in available_ports:
-            # Arduino boards typically show up with manufacturer "Arduino" or "CH340" (cheap clones)
-            # or product description containing "Arduino"
-            if port.manufacturer and ("Arduino" in port.manufacturer or "CH340" in port.manufacturer):
-                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
+            # 1. Check against your official settings list
+            if port.manufacturer in target_manufacturers:
+                print(f"INFO: Official Arduino detected: {port.device}")
                 return port.device
-            elif port.product and "Arduino" in port.product:
-                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
+
+            # 2. Check for common keywords in description/product
+            description = (port.description or "").lower()
+            if any(key in description for key in ["arduino", "ch340", "ch341", "cp210x", "usb2.0-serial"]):
+                print(f"INFO: Arduino-compatible device found: {port.device} ({port.description})")
                 return port.device
-            elif port.description and "Arduino" in port.description:
-                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
-                return port.device
-            # Also check for CH340 or generic USB serial adapters that might be used
-            elif "/dev/ttyUSB" in port.device or "/dev/ttyACM" in port.device:
-                # Log available ports for debugging purposes
-                print(f"DEBUG: Found potential Arduino port: {port.device} ({port.description})")
+
+            # 3. Store the first USB-Serial device as a fallback
+            if "/dev/ttyUSB" in port.device or "/dev/ttyACM" in port.device:
+                if potential_fallback is None:
+                    potential_fallback = port.device
         
-        print("WARNING: Arduino not found on any serial port.")
+        # If no perfect match was found, use the first USB serial device found
+        if potential_fallback:
+            print(f"WARNING: No confirmed Arduino found. Falling back to potential port: {potential_fallback}")
+            return potential_fallback
+
+        print("WARNING: No serial ports detected at all.")
         return None
         
     except Exception as e:
