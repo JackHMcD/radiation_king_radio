@@ -64,12 +64,16 @@ def reset_serial_port(port_name):
 
 # UART Connection
 def open_serial_connection():
-    """Open the UART connection to the Pi Pico."""
+    """Open the UART connection to the Pi Pico or Arduino."""
     global uart, exit_requested
     max_retries = 10
     retry_count = 0
     start_time = time.time()
     total_timeout = 60  # Timeout after 60 seconds
+    
+    # First attempt: try the configured port (usually for Pico)
+    configured_port = settings.UART_SETTINGS['serial_port']
+    arduino_port = None
 
     while not uart and retry_count < max_retries and not exit_requested:
         if time.time() - start_time > total_timeout:
@@ -78,11 +82,28 @@ def open_serial_connection():
             return  # Exit without crashing the system
 
         try:
-            print(f"INFO: Attempting to connect to UART on port {settings.UART_SETTINGS['serial_port']} "
+            # Use configured port, or Arduino port if found
+            port_to_try = configured_port
+            
+            # If configured port is not available and not yet tried Arduino, try Arduino
+            if not validate_serial_port(configured_port) and arduino_port is None:
+                print(f"INFO: Configured port {configured_port} not available. Searching for Arduino...")
+                arduino_port = find_arduino_port()
+                if arduino_port:
+                    print(f"INFO: Found Arduino, switching to port {arduino_port}")
+                    port_to_try = arduino_port
+                else:
+                    print("ERROR: Neither Pi Pico nor Arduino found on available serial ports.")
+                    retry_count += 1
+                    time.sleep(3)
+                    continue
+            
+            # Attempt connection
+            print(f"INFO: Attempting to connect to UART on port {port_to_try} "
                   f"at {settings.UART_SETTINGS['baud_rate']} baud.")
 
             uart = serial.Serial(
-                port=settings.UART_SETTINGS["serial_port"],
+                port=port_to_try,
                 baudrate=settings.UART_SETTINGS["baud_rate"],
                 timeout=settings.UART_SETTINGS["timeout"],
                 write_timeout=1.0
@@ -90,6 +111,8 @@ def open_serial_connection():
 
             if uart.is_open:
                 print(f"INFO: UART successfully connected on port {uart.name}")
+                # Update settings to remember which port we're using
+                settings.UART_SETTINGS['serial_port'] = port_to_try
                 return  # Exit the loop on success
         except serial.SerialException as e:
             print(f"ERROR: Failed to connect to UART: {e}")
@@ -108,15 +131,15 @@ def open_serial_connection():
 
 # Pi Pico Detection and Mounting
 def detect_and_mount_pico():
-    """Detect and mount the Pi Pico device."""
+    """Detect and mount the Pi Pico device. Returns True if successful, False otherwise."""
     global usb_path, partition
     try:
         # List all media devices
         usb_devices = list_media_devices()
         print(f"DEBUG: Detected USB devices: {usb_devices}")
         if not usb_devices:
-            print("ERROR: No removable USB devices detected.")
-            sys.exit(1)
+            print("WARNING: No removable USB devices detected.")
+            return False
 
         # Iterate over detected devices
         for device in usb_devices:
@@ -146,22 +169,22 @@ def detect_and_mount_pico():
                     # Validate the mount path
                     if os.path.isdir(usb_path):
                         print(f"INFO: Pi Pico successfully mounted at {usb_path}")
-                        return usb_path
+                        return True
                     else:
                         print(f"ERROR: Mount path {usb_path} does not exist or is inaccessible.")
-                        sys.exit(1)
+                        return False
                 else:
                     print(f"WARNING: Device mismatch - Vendor: {vendor}, Model: {model}, Size: {size}")
             except Exception as e:
                 print(f"ERROR: Failed to retrieve device information for {device}: {e}")
         
         # If no valid Pico device is found
-        print("ERROR: Pi Pico not detected. Please verify the connected devices.")
-        sys.exit(1)
+        print("WARNING: Pi Pico not detected.")
+        return False
 
     except Exception as e:
-        print(f"ERROR: Unable to detect USB devices: {e}")
-        sys.exit(1)
+        print(f"WARNING: Unable to detect USB devices: {e}")
+        return False
 
 
 def remount_pico(partition, mount_path):
@@ -254,13 +277,59 @@ def get_uart():
     global uart
     return uart
 
+# Arduino Detection
+def find_arduino_port():
+    """
+    Detect Arduino board on serial ports.
+    Returns the port name if found, None otherwise.
+    """
+    try:
+        available_ports = serial.tools.list_ports.comports()
+        print(f"DEBUG: Available serial ports: {[port.device for port in available_ports]}")
+        
+        for port in available_ports:
+            # Arduino boards typically show up with manufacturer "Arduino" or "CH340" (cheap clones)
+            # or product description containing "Arduino"
+            if port.manufacturer and ("Arduino" in port.manufacturer or "CH340" in port.manufacturer):
+                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
+                return port.device
+            elif port.product and "Arduino" in port.product:
+                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
+                return port.device
+            elif port.description and "Arduino" in port.description:
+                print(f"INFO: Arduino detected on port {port.device} ({port.description})")
+                return port.device
+            # Also check for CH340 or generic USB serial adapters that might be used
+            elif "/dev/ttyUSB" in port.device or "/dev/ttyACM" in port.device:
+                # Log available ports for debugging purposes
+                print(f"DEBUG: Found potential Arduino port: {port.device} ({port.description})")
+        
+        print("WARNING: Arduino not found on any serial port.")
+        return None
+        
+    except Exception as e:
+        print(f"ERROR: Failed to scan for Arduino: {e}")
+        return None
+
 # Main Initialization
 def initialize():
     global usb_path, partition
     gpio_available = detect_and_initialize_gpio()
-    usb_path = detect_and_mount_pico()
-    copy_files_to_pico()
+    
+    # Try to detect and mount Pi Pico (optional - for file-based programming)
+    pico_mounted = detect_and_mount_pico()
+    if pico_mounted:
+        copy_files_to_pico()
+    else:
+        print("INFO: Pi Pico file mounting not available. Continuing with serial-only mode.")
+    
+    # Attempt to open serial connection (Pico or Arduino)
     open_serial_connection()
+    
+    # Verify we have a serial connection
+    if not uart:
+        print("ERROR: Failed to establish serial connection. Radio cannot function without Pico or Arduino.")
+        sys.exit(1)
 
 
 # Main Execution

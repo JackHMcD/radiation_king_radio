@@ -96,6 +96,12 @@ PICO = {
     "size": 1049088,
 }
 
+# Arduino detection (UNO, Mega, Leonardo, etc.)
+ARDUINO = {
+    "manufacturers": ["Arduino", "Arduino SA", "Arduino LLC"],
+    "baud_rate": 115200,
+}
+
 ACTIONS = {
     pygame.K_1: "button_1",
     pygame.K_2: "button_2",
