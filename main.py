@@ -345,8 +345,8 @@ def get_audio_length_mutagen(file_path):
         return 0
 
 
-def has_valid_ogg_files(path):
-    return any(file.name.endswith('.ogg') for file in os.scandir(path))
+def has_valid_audio_files(path):
+    return any(file.name.endswith(('.ogg', '.mp3', '.m4b')) for file in os.scandir(path))
 
 def get_radio_bands(radio_folder):
     global master_start_time
@@ -362,7 +362,7 @@ def get_radio_bands(radio_folder):
             sub_radio_bands = []
 
             for sub_folder in sorted(os.scandir(folder.path), key=lambda f: f.name.lower()):
-                if sub_folder.is_dir() and has_valid_ogg_files(sub_folder.path):
+                if sub_folder.is_dir() and has_valid_audio_files(sub_folder.path):
                     # Set force_rebuild to True if needed
                     station_data = handle_station_folder(sub_folder, folder.name, force_rebuild=settings.RESET_CACHE)
                     if station_data:
@@ -390,8 +390,11 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
     rebuild_needed = settings.RESET_CACHE or force_rebuild or not os.path.exists(station_ini_file)
     station_data = {}
 
-    # Normalize and sort the current .ogg files
-    current_files = sorted(os.path.basename(f).strip().lower() for f in glob.glob(os.path.join(path, "*.ogg")))
+    # Normalize and sort the current audio files
+    current_files = sorted(os.path.basename(f).strip().lower() for f in 
+                          glob.glob(os.path.join(path, "*.ogg")) + 
+                          glob.glob(os.path.join(path, "*.mp3")) + 
+                          glob.glob(os.path.join(path, "*.m4b")))
 
     if not rebuild_needed:
         try:
@@ -442,7 +445,9 @@ def validate_station_data(data):
 def rebuild_station_cache(path, sub_folder_name, band_name):
     print(f"INFO: Starting Data Cache Rebuild for {sub_folder_name}")
     station_ini_file = os.path.join(path, "station.ini")
-    station_files = glob.glob(os.path.join(path, "*.ogg"))
+    station_files = (glob.glob(os.path.join(path, "*.ogg")) + 
+                    glob.glob(os.path.join(path, "*.mp3")) + 
+                    glob.glob(os.path.join(path, "*.m4b")))
 
     if not station_files:
         print(f"Warning: No audio files found in {sub_folder_name}. Skipping station.")
@@ -1165,7 +1170,7 @@ def load_static_sounds():
         
         # Fetch and sort all files in the static sounds folder
         all_static_files = sorted(
-            [f.path for f in os.scandir(settings.STATIC_SOUNDS_FOLDER) if f.name.endswith(".ogg")],
+            [f.path for f in os.scandir(settings.STATIC_SOUNDS_FOLDER) if f.name.endswith((".ogg", ".mp3", ".m4b"))],
             key=lambda f: os.path.basename(f).lower()
         )
 
@@ -1187,7 +1192,7 @@ def load_static_sounds():
 
 
 def run():
-    global clock, on_off_state, snd_on, tuning_locked, restore_angle, total_station_num
+    global uart, clock, on_off_state, snd_on, tuning_locked, restore_angle, total_station_num
     global motor_angle, radio_band_total, radio_band_list, heartbeat_time, pico_heartbeat_time, pico_state
 
     # Ensure UART is initialized

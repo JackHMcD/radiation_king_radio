@@ -2,7 +2,7 @@ import pygame
 
 # File paths
 SAVE_FILE = "saved.ini"
-STATIONS_ROOT_FOLDER = "radio/"
+STATIONS_ROOT_FOLDER = "/mnt/radio/"
 STATIC_SOUNDS_FOLDER = "sounds/STATIC_SOUNDS_FOLDER"
 STATIC_PRELOAD_NUM = 6 #Control the number of preloaded static files
 PICO_SOURCE = "pi_pico_files/"
