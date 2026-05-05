@@ -201,13 +201,6 @@ def map_range(x, in_min, in_max, out_min, out_max):
 
 def blink_led():
     global led_state
-    if not settings.DISABLE_HEARTBEAT_LED:
-        if led_state:
-            os.system('echo 0 | sudo dd status=none of=/sys/class/leds/led0/brightness')  # led on
-            led_state = False
-        else:
-            os.system('echo 1 | sudo dd status=none of=/sys/class/leds/led0/brightness')  # led off
-            led_state = True
 
 
 def set_volume_level(volume_level, direction=None):
@@ -1280,8 +1273,9 @@ def run():
     #select_station(get_nearest_station(motor_angle), True)
     print("****** Radiation King Radio is now running ******")
     
-    standby(True) #Go into standby at start up
-    
+    # standby(True) #Go into standby at start up
+    resume_from_standby(True)
+
     try:
         while True:
             now = time.time()
