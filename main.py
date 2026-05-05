@@ -17,7 +17,7 @@ import json
 import subprocess
 import concurrent.futures
 import signal
-import mutagen
+from tinytag import TinyTag
 import serial
 from copy import deepcopy
 from subprocess import call
@@ -331,17 +331,15 @@ def handle_event(event):
 
 
 
-def get_audio_length_mutagen(file_path):
+def get_audio_length(file_path):
     try:
-        audio = mutagen.File(file_path)
-        if audio is not None and hasattr(audio.info, 'length'):
-            length = audio.info.length
-            #print(f"CACHE: {file_path}, Length: {length}")
-            return length
+        tag = TinyTag.get(file_path)
+        if tag.duration is not None:
+            return tag.duration
         else:
-            raise ValueError(f"Mutagen could not read duration of {file_path}")
+            raise ValueError(f"TinyTag could not read duration of {file_path}")
     except Exception as e:
-        print(f"ERROR: While getting duration of {file_path} with mutagen: {e}")
+        print(f"ERROR: While getting duration of {file_path} with tinytag: {e}")
         return 0
 
 
@@ -390,11 +388,10 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
     rebuild_needed = settings.RESET_CACHE or force_rebuild or not os.path.exists(station_ini_file)
     station_data = {}
 
-    # Normalize and sort the current audio files
-    current_files = sorted(os.path.basename(f).strip().lower() for f in 
-                          glob.glob(os.path.join(path, "*.ogg")) + 
-                          glob.glob(os.path.join(path, "*.mp3")) + 
-                          glob.glob(os.path.join(path, "*.m4b")))
+    # Use a single os.scandir pass for efficiency instead of 3 glob.glob calls
+    valid_exts = ('.ogg', '.mp3', '.m4b')
+    current_file_paths = [f.path for f in os.scandir(path) if f.is_file() and f.name.lower().endswith(valid_exts)]
+    current_files = sorted(os.path.basename(f).strip().lower() for f in current_file_paths)
 
     if not rebuild_needed:
         try:
@@ -428,7 +425,7 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
     if rebuild_needed:
         print(f"DEBUG: Rebuilding cache for {sub_folder.name}.")
         #print(f"DEBUG: Rebuilding cache for {sub_folder.name}. Current files: {current_files}")
-        station_data = rebuild_station_cache(path, sub_folder.name, band_name)
+        station_data = rebuild_station_cache(path, sub_folder.name, band_name, current_file_paths)
 
     return station_data
 
@@ -442,12 +439,13 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
 def validate_station_data(data):
     return data.get("station_files") and isinstance(data["station_files"], list) and data["station_files"]
     
-def rebuild_station_cache(path, sub_folder_name, band_name):
+def rebuild_station_cache(path, sub_folder_name, band_name, station_files=None, existing_cache=None):
     print(f"INFO: Starting Data Cache Rebuild for {sub_folder_name}")
     station_ini_file = os.path.join(path, "station.ini")
-    station_files = (glob.glob(os.path.join(path, "*.ogg")) + 
-                    glob.glob(os.path.join(path, "*.mp3")) + 
-                    glob.glob(os.path.join(path, "*.m4b")))
+        
+    if station_files is None:
+        valid_exts = ('.ogg', '.mp3', '.m4b')
+        station_files = [f.path for f in os.scandir(path) if f.is_file() and f.name.lower().endswith(valid_exts)]
 
     if not station_files:
         print(f"Warning: No audio files found in {sub_folder_name}. Skipping station.")
@@ -456,20 +454,50 @@ def rebuild_station_cache(path, sub_folder_name, band_name):
     # Sort files using the updated extract_number function
     station_files = sorted(station_files, key=extract_number)
 
-    # Get audio lengths in parallel
+    file_to_length = {}
+    files_to_scan = []
+    
+    # Load existing cached lengths if available
+    cached_lengths_map = {}
+    if existing_cache and "station_files" in existing_cache and "station_lengths" in existing_cache:
+        cached_files = existing_cache["station_files"]
+        cached_lens = existing_cache["station_lengths"]
+        if len(cached_files) == len(cached_lens):
+            for f, l in zip(cached_files, cached_lens):
+                cached_lengths_map[os.path.basename(f).strip().lower()] = l
+
+    for f in station_files:
+        basename = os.path.basename(f).strip().lower()
+        if basename in cached_lengths_map:
+            file_to_length[f] = cached_lengths_map[basename]
+        else:
+            files_to_scan.append(f)
+
+    if files_to_scan:
+        print(f"INFO: Scanning {len(files_to_scan)} new/modified files in {sub_folder_name}...")
+        # Limit max_workers to prevent SD card I/O thrashing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_file = {executor.submit(get_audio_length, file_path): file_path for file_path in files_to_scan}
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_path = future_to_file[future]
+                try:
+                    length = future.result()
+                    if length > 0:
+                        file_to_length[file_path] = length
+                    else:
+                        print(f"Warning: Invalid length for {file_path}.")
+                except Exception as e:
+                    print(f"Failed to get length for {file_path}: {str(e)}")
+
+    # Rebuild ordered lists
+    valid_station_files = []
     station_lengths = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_to_file = {executor.submit(get_audio_length_mutagen, file_path): file_path for file_path in station_files}
-        for future in concurrent.futures.as_completed(future_to_file):
-            file_path = future_to_file[future]
-            try:
-                length = future.result()
-                if length > 0:
-                    station_lengths.append(length)
-                else:
-                    print(f"Warning: Invalid length for {file_path}.")
-            except Exception as e:
-                print(f"Failed to get length for {file_path}: {str(e)}")
+    for f in station_files:
+        if f in file_to_length and file_to_length[f] > 0:
+            valid_station_files.append(f)
+            station_lengths.append(file_to_length[f])
+
+    station_files = valid_station_files
 
     if not station_lengths:
         print(f"Warning: Could not determine lengths for any files in {sub_folder_name}. Skipping station.")
