@@ -11,6 +11,7 @@ pyudev
 sounddevice
 soundfile
 schedule #https://pypi.org/project/schedule/
+tinytag
 
 #Neeeded for soft off via GPIO17:
 #curl https://get.pimoroni.com/onoffshim | bash

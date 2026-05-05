@@ -398,11 +398,7 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
                 # Normalize and sort the cached file list
                 cached_files = sorted(os.path.basename(f).strip().lower() for f in station_data.get("station_files", []))
 
-                # Compare paths
-                cached_path = station_data.get("path")
-                if cached_path != path:
-                    print(f"DEBUG: Path mismatch in {sub_folder.name}. Cached: {cached_path}, Current: {path}")
-                    rebuild_needed = True
+                # Compare paths - Path mismatch no longer triggers a rebuild!
 
                 # Compare file lists
                 if current_files != cached_files:
@@ -410,6 +406,12 @@ def handle_station_folder(sub_folder, band_name, force_rebuild=False):
                     #print(f"DEBUG: Current files ({len(current_files)}): {current_files}")
                     #print(f"DEBUG: Cached files ({len(cached_files)}): {cached_files}")
                     rebuild_needed = True
+                else:
+                    # Hot-swap the current path into the loaded data
+                    station_data["path"] = path
+                    
+                    # If this was an old cache, the files might still be absolute paths. Convert them to relative filenames in memory.
+                    station_data["station_files"] = [os.path.basename(f) for f in station_data.get("station_files", [])]
 
         except Exception as error:
             print(f"ERROR: Exception reading cache for {sub_folder.name}: {error}")
@@ -487,7 +489,7 @@ def rebuild_station_cache(path, sub_folder_name, band_name, station_files=None, 
     station_lengths = []
     for f in station_files:
         if f in file_to_length and file_to_length[f] > 0:
-            valid_station_files.append(f)
+            valid_station_files.append(os.path.basename(f))
             station_lengths.append(file_to_length[f])
 
     station_files = valid_station_files
@@ -1369,6 +1371,7 @@ class Radiostation:
 
         self.label = None
         self.directory = None
+        self.path = None
         self.files = deque()
         self.song_lengths = deque()
         self.total_length = []
@@ -1414,7 +1417,7 @@ class Radiostation:
                 self.reference_time = time.time() - self.position
 
             self.filename = self.files[0]
-            song = self.filename
+            song = os.path.join(self.path, self.filename)
 
             pygame.mixer.music.load(song)
             try:
@@ -1468,7 +1471,7 @@ class Radiostation:
         self.reference_time = time.time()
         self.position = 0
         self.filename = self.files[0]
-        song = self.filename
+        song = os.path.join(self.path, self.filename)
 
         print("Info: Playing next song =", self.filename,
               "length =", str(round(self.song_lengths[0], 2)),
