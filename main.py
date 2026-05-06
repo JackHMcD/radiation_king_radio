@@ -26,6 +26,7 @@ import setup
 setup.initialize()
 import pygame
 import settings
+import mpd
 
 #Logging
 import logging
@@ -141,6 +142,15 @@ pygame.mixer.Channel(2)
 pygame.mixer.Channel(3)
 pygame.mixer.Channel(4)
 
+    print("Startup: Starting MPD backend initialization")
+    mpd_client = mpd.MPDClient()
+    try:
+        mpd_client.connect(settings.MPD_SETTINGS["host"], settings.MPD_SETTINGS["port"])
+        mpd_client.update()
+        print("Success: Connected to MPD backend")
+    except Exception as e:
+        print(f"Warning: Failed to connect to MPD backend: {e}")
+
 snd_off = pygame.mixer.Sound(settings.SOUND_EFFECTS["off"])
 snd_on = pygame.mixer.Sound(settings.SOUND_EFFECTS["on"])
 snd_band = pygame.mixer.Sound(settings.SOUND_EFFECTS["band_change"])
@@ -207,7 +217,7 @@ def set_volume_level(volume_level, direction=None):
     """
     Adjust the volume level, taking into account whether music or static is playing.
     """
-    global volume, volume_prev, static_playback_active, static_volume
+    global volume, volume_prev, static_playback_active, static_volume, mpd_client
 
     # Avoid unnecessary recalculations if the volume level hasn't changed
     if volume_level == volume_prev:
@@ -222,12 +232,14 @@ def set_volume_level(volume_level, direction=None):
     # Clamp the volume level to the defined min and max range
     volume = clamp(round(float(volume_level), 3), settings.VOLUME_SETTINGS["min"], 1)
 
+    # Adjust the MPD volume globally
+    try:
+        mpd_client.setvol(int(volume * 100))
+    except Exception:
+        pass
+
     # Adjust the volume for music or static
-    if pygame.mixer.music.get_busy() and not static_playback_active:
-        # Music is playing
-        pygame.mixer.music.set_volume(volume)
-        #print("Adjusted just music volume")
-    else:
+    if static_playback_active or not pygame.mixer.music.get_busy():
         # Static playback
         static_volume = set_static_volume()
         if static_playback_active:
@@ -676,7 +688,10 @@ def tuning(manual=False):
             tuning_locked = True
             tuning_volume = volume  # Set volume to normal
             select_station(nearest_station_num, False)
-            pygame.mixer.music.set_volume(volume)
+            try:
+                mpd_client.setvol(int(volume * 100))
+            except Exception:
+                pass
             play_static(False)  # Stop static playback
             static_playback_active = False  # Ensure static remains stopped
 
@@ -1279,6 +1294,7 @@ def run():
     resume_from_standby(True)
 
     try:
+        mpd_poll_counter = 0
         while True:
             now = time.time()
 
@@ -1314,6 +1330,19 @@ def run():
             if on_off_state:
                 tuning()
                 play_static()
+
+            # MPD Song End detection (Checks twice a second)
+            mpd_poll_counter += 1
+            if mpd_poll_counter >= (settings.TICK / 2):
+                mpd_poll_counter = 0
+                if active_station and active_station.state == active_station.STATES['playing']:
+                    try:
+                        mpd_status = mpd_client.status()
+                        if mpd_status.get('state') == 'stop':
+                            # Emulate Pygame's native EVENT push for remote functionality
+                            pygame.event.post(pygame.event.Event(settings.EVENTS['SONG_END']))
+                    except Exception:
+                        pass
 
             # Send heartbeat to Pico if necessary (skip if using Arduino)
             if settings.USE_HEARTBEAT and now - heartbeat_time > settings.UART_SETTINGS["heartbeat_interval"]:
@@ -1390,48 +1419,52 @@ class Radiostation:
         pygame.mixer.music.set_endevent(settings.EVENTS['SONG_END'])
 
     def live_playback(self):
-        global volume
+        global volume, mpd_client, master_start_time
         if self.files:
 
-            #Update position based on time that has passed
-            self.position = time.time() - self.reference_time
-
-            #  Subtract time until we are below the station length
-            if self.station_length and self.position > self.station_length:
-                #print("Info: position:",round(self.position, 3),"longer than station length:",round(self.song_length, 3))
-                while self.position > self.station_length:
-                    print("Info: Looping station list")
-                    self.position = self.position - self.station_length
-
-            #  Find where in the station list we should be base on start position
-            self.song_length = self.song_lengths[0]  # length of the current song
-            if self.song_length and self.position > self.song_length:
-                print("Info: Position:",round(self.position, 3),"is longer than the song length:",round(self.song_length, 3),"skipping ahead")
-
-                #  Skip ahead until we reach the correct time
-                while self.position > self.song_length:
-                    self.files.rotate(-1)
-                    self.song_lengths.rotate(-1)
-                    self.position = self.position - self.song_length
-                    self.song_length = self.song_lengths[0]
+            # Instant O(1) math time calculation 
+            elapsed_time = time.time() - (master_start_time + self.station_offset)
+            total_station_length = sum(self.song_lengths)
+            
+            if total_station_length > 0 and elapsed_time > 0:
+                self.position = elapsed_time % total_station_length
+                accumulated_length = 0
+                
+                for i, length in enumerate(self.song_lengths):
+                    if accumulated_length + length > self.position:
+                        self.files.rotate(-i)
+                        self.song_lengths.rotate(-i)
+                        self.position -= accumulated_length
+                        break
+                    accumulated_length += length
+                    
                 self.reference_time = time.time() - self.position
 
             self.filename = self.files[0]
-            song = os.path.join(self.path, self.filename)
+            self.song_length = self.song_lengths[0]
+            
+            # Construct relative path for MPD daemon
+            rel_path = os.path.join(self.directory, self.label, self.filename)
 
-            pygame.mixer.music.load(song)
             try:
-                pygame.mixer.music.play(0, self.position)
-            except:
-                pygame.mixer.music.play(0, 0)
-            pygame.mixer.music.set_volume(volume)
+                mpd_client.clear()
+                mpd_client.add(rel_path)
+                mpd_client.setvol(int(volume * 100))
+                mpd_client.play(0)
+                if self.position > 0:
+                    mpd_client.seekcur(self.position)
+            except Exception as e:
+                print(f"MPD Backend Playback Error: {e}")
 
             self.state = self.STATES['playing']
 
 
     def play(self):
         if self.state == self.STATES['paused']:
-            pygame.mixer.music.unpause()
+            try:
+                mpd_client.pause(0)
+            except Exception:
+                pass
             self.state = self.STATES['playing']
         else:
             self.live_playback()
@@ -1440,49 +1473,55 @@ class Radiostation:
 
     def play_pause(self):
         # print("Event: Play/pause triggered")
-        if not pygame.mixer.music.get_busy():
+        if self.state != self.STATES['playing']:
             self.play()
         else:
             self.pause()
 
     def pause(self):
         self.state = self.STATES['paused']
-        if pygame.mixer.music.get_busy():
-            pygame.mixer.music.pause()
-            self.state = self.STATES['paused']
-            play_static(False)
+        try:
+            mpd_client.pause(1)
+        except Exception:
+            pass
+        play_static(False)
         print("Action: Music paused")
 
 
     def stop(self):
         self.state = self.STATES['stopped']
+        try:
+            mpd_client.stop()
+        except Exception:
+            pass
         if self.filename:
             self.last_filename = self.filename
-            self.last_play_position = pygame.mixer.music.get_pos()
+            self.last_play_position = self.position
             self.last_playtime = time.time()
         pygame.mixer.music.stop()
         # print("Music stopped")
 
 
     def next_song(self):
-        global volume
+        global volume, mpd_client
         self.files.rotate(-1)
         self.song_lengths.rotate(-1)
         self.reference_time = time.time()
         self.position = 0
         self.filename = self.files[0]
-        song = os.path.join(self.path, self.filename)
+        
+        rel_path = os.path.join(self.directory, self.label, self.filename)
 
         print("Info: Playing next song =", self.filename,
               "length =", str(round(self.song_lengths[0], 2)),
               "position =", str(round(self.position, 2))
               )
-        pygame.mixer.music.load(song)
         try:
-            pygame.mixer.music.play(0, self.position)
-        except:
-            pygame.mixer.music.play(0, 0)
-        pygame.mixer.music.set_volume(volume)
+            mpd_client.clear()
+            mpd_client.add(rel_path)
+            mpd_client.play(0)
+        except Exception as e:
+            print(f"MPD Error: {e}")
         self.state = self.STATES['playing']
 
 

@@ -15,6 +15,12 @@ AUDIO_SETTINGS = {
     "channels": 2,
     "buffer": 8192,
 }
+
+# MPD backend settings
+MPD_SETTINGS = {
+    "host": "localhost",
+    "port": 6600,
+}
 VOLUME_SETTINGS = {
     "default": 0.05,
     "step": 0.008,
