@@ -50,6 +50,7 @@ signal.signal(signal.SIGINT, signal_handler)
 clock = pygame.time.Clock()
 volume = float(0.05)
 static_volume = float(0.008)
+static_volume_multiplier = float(1.0)
 volume_prev = float(0.0)
 station_num = int(0)
 station_list = []
@@ -142,14 +143,14 @@ pygame.mixer.Channel(2)
 pygame.mixer.Channel(3)
 pygame.mixer.Channel(4)
 
-    print("Startup: Starting MPD backend initialization")
-    mpd_client = mpd.MPDClient()
-    try:
-        mpd_client.connect(settings.MPD_SETTINGS["host"], settings.MPD_SETTINGS["port"])
-        mpd_client.update()
-        print("Success: Connected to MPD backend")
-    except Exception as e:
-        print(f"Warning: Failed to connect to MPD backend: {e}")
+print("Startup: Starting MPD backend initialization")
+mpd_client = mpd.MPDClient()
+try:
+    mpd_client.connect(settings.MPD_SETTINGS["host"], settings.MPD_SETTINGS["port"])
+    mpd_client.update()
+    print("Success: Connected to MPD backend")
+except Exception as e:
+    print(f"Warning: Failed to connect to MPD backend: {e}")
 
 snd_off = pygame.mixer.Sound(settings.SOUND_EFFECTS["off"])
 snd_on = pygame.mixer.Sound(settings.SOUND_EFFECTS["on"])
@@ -661,13 +662,15 @@ def play_static(play=None):
 
 
 def set_static_volume():
-    global volume
-    return max(round(volume * settings.VOLUME_SETTINGS["static_volume"], 3), settings.VOLUME_SETTINGS["static_min"])
+    global volume, static_volume_multiplier
+    vol = round(volume * settings.VOLUME_SETTINGS["static_volume"] * static_volume_multiplier, 3)
+    return max(vol, settings.VOLUME_SETTINGS["static_min"])
 
 
 
 def tuning(manual=False):
     global motor_angle, tuning_locked, tuning_prev_angle, station_num, active_station, static_playback_active
+    global volume, static_volume_multiplier
 
     # Skip if the angle hasn't changed and it's not a manual tuning
     if motor_angle == tuning_prev_angle and not manual:
@@ -684,39 +687,52 @@ def tuning(manual=False):
 
     # Check if we're close enough to lock onto the station
     if range_to_station <= settings.TUNING_SETTINGS["lock_on"]:
+        static_volume_multiplier = 0.0
         if not tuning_locked:
             tuning_locked = True
-            tuning_volume = volume  # Set volume to normal
             select_station(nearest_station_num, False)
             try:
                 mpd_client.setvol(int(volume * 100))
             except Exception:
                 pass
+            pygame.mixer.music.set_volume(volume)
             play_static(False)  # Stop static playback
             static_playback_active = False  # Ensure static remains stopped
 
-    # Check if we're close to a station (but not locked)
+    # Check if we're close to a station (but not locked) -> CROSSFADE ZONE
     elif range_to_station < settings.TUNING_SETTINGS["near"]:
-        tuning_volume = clamp(round(volume / range_to_station, 3), settings.VOLUME_SETTINGS["min"], 1)
-        pygame.mixer.music.set_volume(tuning_volume)
-
-        if active_station:
-            play_static(True)  # Play static with station audio
-            static_playback_active = True
-            tuning_locked = False
-        else:
+        # Calculate fade ratio (1.0 is furthest away, 0.0 is locked on)
+        distance_ratio = (range_to_station - settings.TUNING_SETTINGS["lock_on"]) / (settings.TUNING_SETTINGS["near"] - settings.TUNING_SETTINGS["lock_on"])
+        distance_ratio = clamp(distance_ratio, 0.0, 1.0)
+        
+        static_volume_multiplier = distance_ratio
+        tuning_volume = clamp(round(volume * (1.0 - distance_ratio), 3), settings.VOLUME_SETTINGS["min"], volume)
+        
+        if not active_station:
             select_station(nearest_station_num, False)
+
+        pygame.mixer.music.set_volume(tuning_volume)
+        try:
+            mpd_client.setvol(int(tuning_volume * 100))
+        except Exception:
+            pass
+
+        play_static(True)  # Play static with station audio
+        pygame.mixer.Channel(1).set_volume(set_static_volume())
+        static_playback_active = True
+        tuning_locked = False
 
     # If not near any station, play only static
     else:
+        static_volume_multiplier = 1.0
         if active_station:
-            # print(f"Tuning: No active station. Nearest station: #{nearest_station_num}, Angle: {station_angle}, Needle: {motor_angle}, Separation: {tuning_seperation}")
             active_station.stop()
             pygame.mixer.music.stop()
             active_station = None
             station_num = None
 
         play_static(True)  # Play only static
+        pygame.mixer.Channel(1).set_volume(set_static_volume())
         static_playback_active = True
         tuning_locked = False
 
@@ -841,9 +857,7 @@ def select_station(new_station_num, manual=False):
     pygame.mixer.music.set_endevent(pygame.NOEVENT)
 
     # Stop any active playback and reset state
-    play_static(False)
     pygame.mixer.music.stop()
-    pygame.mixer.Channel(1).stop()
 
     # Clear any lingering SONG_END events from the queue
     pygame.event.clear(settings.EVENTS['SONG_END'])
@@ -1132,7 +1146,7 @@ def handle_info_message(uart_message):
 
 def handle_heartbeat_message(uart_message):
     global pico_heartbeat_time, pico_state
-    if uart_message[1] == "Pico":
+    if len(uart_message) > 1 and uart_message[1] in ["Pico", "Arduino"]:
         pico_heartbeat_time = time.time()
         pico_state = True
 
@@ -1419,7 +1433,7 @@ class Radiostation:
         pygame.mixer.music.set_endevent(settings.EVENTS['SONG_END'])
 
     def live_playback(self):
-        global volume, mpd_client, master_start_time
+        global volume, tuning_volume, mpd_client, master_start_time
         if self.files:
 
             # Instant O(1) math time calculation 
@@ -1449,7 +1463,7 @@ class Radiostation:
             try:
                 mpd_client.clear()
                 mpd_client.add(rel_path)
-                mpd_client.setvol(int(volume * 100))
+                mpd_client.setvol(int(tuning_volume * 100))
                 mpd_client.play(0)
                 if self.position > 0:
                     mpd_client.seekcur(self.position)
